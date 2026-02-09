@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState, ChangeEvent } from "react";
-// Đảm bảo file api.ts đã export các interface tương ứng
 import { analyzeImage, API_BASE, exportPdf } from "./api";
 
-// --- 1. Định nghĩa các Kiểu dữ liệu (Interfaces) ---
 
 interface Line {
   text: string;
@@ -33,22 +31,19 @@ const emptyState: AppState = {
   blocks: [],
 };
 
-// --- 2. Component chính ---
 
 export default function App() {
-  // Định nghĩa Type cho Refs
-  const videoRef = useRef < HTMLVideoElement | null > (null);
-  const captureCanvasRef = useRef < HTMLCanvasElement | null > (null);
-  const overlayCanvasRef = useRef < HTMLCanvasElement | null > (null);
-  const warpedImageRef = useRef < HTMLImageElement | null > (null);
-  const fileInputRef = useRef < HTMLInputElement | null > (null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const warpedImageRef = useRef<HTMLImageElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // State với kiểu dữ liệu rõ ràng
-  const [stage, setStage] = useState < Stage > ("camera");
-  const [captureBlob, setCaptureBlob] = useState < Blob | null > (null);
-  const [state, setState] = useState < AppState > (emptyState);
-  const [error, setError] = useState < string > ("");
-  const [busy, setBusy] = useState < boolean > (false);
+  const [stage, setStage] = useState<Stage>("camera");
+  const [captureBlob, setCaptureBlob] = useState<Blob | null>(null);
+  const [state, setState] = useState<AppState>(emptyState);
+  const [error, setError] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
 
   // Xử lý Camera
   useEffect(() => {
