@@ -1,0 +1,20 @@
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+import "./styles.css";
+
+const container = document.getElementById("root");
+
+if (!container) {
+    throw new Error(
+        "Không tìm thấy phần tử 'root'. Vui lòng kiểm tra lại file index.html của bạn."
+    );
+}
+
+const root = createRoot(container);
+
+root.render(
+    <React.StrictMode>
+        <App />
+    </React.StrictMode>
+);

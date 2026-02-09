@@ -1,30 +1,60 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { analyzeImage, API_BASE, exportPdf } from "./api.js";
+import React, { useCallback, useEffect, useRef, useState, ChangeEvent } from "react";
+// Đảm bảo file api.ts đã export các interface tương ứng
+import { analyzeImage, API_BASE, exportPdf } from "./api";
 
-const emptyState = {
+// --- 1. Định nghĩa các Kiểu dữ liệu (Interfaces) ---
+
+interface Line {
+  text: string;
+  bbox: [number, number, number, number];
+  conf?: number;
+}
+
+interface Block {
+  type: string;
+  bbox: [number, number, number, number];
+  lines: Line[];
+  confidence?: number;
+}
+
+interface AppState {
+  previewUrl: string;
+  warpedImageId: string;
+  warpedPreviewUrl: string;
+  blocks: Block[];
+}
+
+type Stage = "camera" | "preview" | "edit";
+
+const emptyState: AppState = {
   previewUrl: "",
   warpedImageId: "",
   warpedPreviewUrl: "",
   blocks: [],
 };
 
-export default function App() {
-  const videoRef = useRef(null);
-  const captureCanvasRef = useRef(null);
-  const overlayCanvasRef = useRef(null);
-  const warpedImageRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const [stage, setStage] = useState("camera");
-  const [captureBlob, setCaptureBlob] = useState(null);
-  const [state, setState] = useState(emptyState);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+// --- 2. Component chính ---
 
+export default function App() {
+  // Định nghĩa Type cho Refs
+  const videoRef = useRef < HTMLVideoElement | null > (null);
+  const captureCanvasRef = useRef < HTMLCanvasElement | null > (null);
+  const overlayCanvasRef = useRef < HTMLCanvasElement | null > (null);
+  const warpedImageRef = useRef < HTMLImageElement | null > (null);
+  const fileInputRef = useRef < HTMLInputElement | null > (null);
+
+  // State với kiểu dữ liệu rõ ràng
+  const [stage, setStage] = useState < Stage > ("camera");
+  const [captureBlob, setCaptureBlob] = useState < Blob | null > (null);
+  const [state, setState] = useState < AppState > (emptyState);
+  const [error, setError] = useState < string > ("");
+  const [busy, setBusy] = useState < boolean > (false);
+
+  // Xử lý Camera
   useEffect(() => {
-    if (stage !== "camera") {
-      return;
-    }
-    let stream;
+    if (stage !== "camera") return;
+
+    let stream: MediaStream | null = null;
     navigator.mediaDevices
       .getUserMedia({ video: { facingMode: "environment" }, audio: false })
       .then((mediaStream) => {
@@ -34,6 +64,7 @@ export default function App() {
         }
       })
       .catch(() => setError("Không thể mở camera. Hãy kiểm tra quyền truy cập."));
+
     return () => {
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
@@ -41,43 +72,42 @@ export default function App() {
     };
   }, [stage]);
 
+  // Chụp ảnh từ Video
   const handleCapture = useCallback(() => {
     const video = videoRef.current;
     const canvas = captureCanvasRef.current;
-    if (!video || !canvas) {
-      return;
-    }
+    if (!video || !canvas) return;
+
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     canvas.toBlob((blob) => {
-      if (!blob) {
-        return;
-      }
+      if (!blob) return;
       setCaptureBlob(blob);
       setState((prev) => ({ ...prev, previewUrl: URL.createObjectURL(blob) }));
       setStage("preview");
     }, "image/jpeg");
   }, []);
 
-  const handleFileUpload = useCallback((event) => {
-    const file = event.target.files[0];
+  // Upload file
+  const handleFileUpload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (!file || !file.type.startsWith("image/")) {
       setError("Vui lòng chọn file ảnh.");
       return;
     }
-    const blob = file;
-    setCaptureBlob(blob);
-    setState((prev) => ({ ...prev, previewUrl: URL.createObjectURL(blob) }));
+    setCaptureBlob(file);
+    setState((prev) => ({ ...prev, previewUrl: URL.createObjectURL(file) }));
     setStage("preview");
     setError("");
   }, []);
 
-  const handleAnalyze = useCallback(async () => {
-    if (!captureBlob) {
-      return;
-    }
+  // Hàm dùng chung cho Analyze và Re-Analyze
+  const performAnalysis = useCallback(async () => {
+    if (!captureBlob) return;
     setBusy(true);
     setError("");
     try {
@@ -96,54 +126,36 @@ export default function App() {
     }
   }, [captureBlob]);
 
-  const handleReAnalyze = useCallback(async () => {
-    if (!captureBlob) {
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      const data = await analyzeImage(captureBlob);
-      setState((prev) => ({
-        ...prev,
-        warpedPreviewUrl: `${API_BASE}${data.warped_preview_url}`,
-        warpedImageId: data.warped_image_id,
-        blocks: data.blocks || [],
-      }));
-    } catch (err) {
-      setError("Phân tích thất bại. Vui lòng thử lại.");
-    } finally {
-      setBusy(false);
-    }
-  }, [captureBlob]);
-
+  // Vẽ Overlay lên Canvas (Bounding Boxes)
   const drawOverlay = useCallback(() => {
     const canvas = overlayCanvasRef.current;
     const image = warpedImageRef.current;
-    if (!canvas || !image) {
-      return;
-    }
+    if (!canvas || !image) return;
+
     const displayWidth = image.clientWidth || image.width;
     const displayHeight = image.clientHeight || image.height;
     const naturalWidth = image.naturalWidth || displayWidth;
     const naturalHeight = image.naturalHeight || displayHeight;
-    if (!displayWidth || !displayHeight) {
-      return;
-    }
+
+    if (!displayWidth || !displayHeight) return;
+
     canvas.width = displayWidth;
     canvas.height = displayHeight;
     const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.lineWidth = 2;
     ctx.strokeStyle = "#ff6f3c";
     ctx.fillStyle = "rgba(255, 111, 60, 0.12)";
+
     const scaleX = displayWidth / naturalWidth;
     const scaleY = displayHeight / naturalHeight;
+
     state.blocks.forEach((block) => {
       const [x1, y1, x2, y2] = block.bbox || [];
-      if (x1 === undefined) {
-        return;
-      }
+      if (x1 === undefined) return;
+
       const dx = x1 * scaleX;
       const dy = y1 * scaleY;
       const dw = (x2 - x1) * scaleX;
@@ -159,16 +171,13 @@ export default function App() {
     }
   }, [stage, drawOverlay]);
 
-  const updateLineText = (blockIndex, lineIndex, value) => {
+  // Cập nhật text từng dòng
+  const updateLineText = (blockIndex: number, lineIndex: number, value: string) => {
     setState((prev) => {
       const blocks = prev.blocks.map((block, bIndex) => {
-        if (bIndex !== blockIndex) {
-          return block;
-        }
+        if (bIndex !== blockIndex) return block;
         const lines = (block.lines || []).map((line, lIndex) => {
-          if (lIndex !== lineIndex) {
-            return line;
-          }
+          if (lIndex !== lineIndex) return line;
           return { ...line, text: value };
         });
         return { ...block, lines };
@@ -177,64 +186,9 @@ export default function App() {
     });
   };
 
-  /*const splitBlocksToLines = () => {
-    setState((prev) => {
-      const blocks = prev.blocks.flatMap((block) => {
-        if (block.type !== "text") {
-          return [block];
-        }
-        return (block.lines || []).map((line) => ({
-          type: "text",
-          bbox: line.bbox,
-          lines: [line],
-          confidence: line.conf,
-        }));
-      });
-      return { ...prev, blocks };
-    });
-  };
-
-  const mergeAllText = () => {
-    setState((prev) => {
-      const lines = prev.blocks
-        .flatMap((block) => (block.type === "text" ? block.lines || [] : []))
-        .filter((line) => line.text && line.text.trim().length > 0);
-      if (!lines.length) {
-        return prev;
-      }
-      const bbox = lines.reduce(
-        (acc, line) => [
-          Math.min(acc[0], line.bbox[0]),
-          Math.min(acc[1], line.bbox[1]),
-          Math.max(acc[2], line.bbox[2]),
-          Math.max(acc[3], line.bbox[3]),
-        ],
-        [lines[0].bbox[0], lines[0].bbox[1], lines[0].bbox[2], lines[0].bbox[3]]
-      );
-      return {
-        ...prev,
-        blocks: [
-          {
-            type: "text",
-            bbox,
-            lines: [
-              {
-                text: lines.map((line) => line.text).join(" "),
-                bbox,
-                conf: Math.min(...lines.map((line) => line.conf || 1)),
-              },
-            ],
-            confidence: Math.min(...lines.map((line) => line.conf || 1)),
-          },
-        ],
-      };
-    });
-  };*/
-
+  // Xuất file PDF
   const handleExport = useCallback(async () => {
-    if (!state.warpedImageId) {
-      return;
-    }
+    if (!state.warpedImageId) return;
     setBusy(true);
     setError("");
     try {
@@ -268,15 +222,11 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" />
-          <div>
-            <h1>TADIZB</h1>
-          </div>
+          <div><h1>TADIZB</h1></div>
         </div>
         <div className="actions">
           {stage !== "camera" && (
-            <button className="ghost" onClick={handleReset}>
-              Chụp lại
-            </button>
+            <button className="ghost" onClick={handleReset}>Chụp lại</button>
           )}
         </div>
       </header>
@@ -310,12 +260,11 @@ export default function App() {
               </div>
             </div>
           )}
+
           <div className="panel-actions">
             {stage === "camera" && (
               <>
-                <button className="primary" onClick={handleCapture}>
-                  Chụp ảnh
-                </button>
+                <button className="primary" onClick={handleCapture}>Chụp ảnh</button>
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -323,22 +272,19 @@ export default function App() {
                   onChange={handleFileUpload}
                   style={{ display: "none" }}
                 />
-                <button
-                  className="secondary"
-                  onClick={() => fileInputRef.current?.click()}
-                >
+                <button className="secondary" onClick={() => fileInputRef.current?.click()}>
                   Upload ảnh
                 </button>
               </>
             )}
             {stage === "preview" && (
-              <button className="primary" disabled={busy} onClick={handleAnalyze}>
+              <button className="primary" disabled={busy} onClick={performAnalysis}>
                 {busy ? "Đang phân tích..." : "Phân tích ảnh"}
               </button>
             )}
             {stage === "edit" && (
               <>
-                <button className="secondary" disabled={busy} onClick={handleReAnalyze}>
+                <button className="secondary" disabled={busy} onClick={performAnalysis}>
                   {busy ? "Đang phân tích lại..." : "Phân tích lại"}
                 </button>
                 <button className="primary" disabled={busy} onClick={handleExport}>
@@ -353,32 +299,26 @@ export default function App() {
         <section className="panel editor-panel">
           <h2>Kết quả</h2>
           {stage !== "edit" && (
-            <div className="hint">
-              Chụp hoặc upload ảnh để phân tích. Kết quả sẽ hiển thị tại đây.
-            </div>
+            <div className="hint">Chụp hoặc upload ảnh để phân tích.</div>
           )}
           {stage === "edit" && (
-            <>
-              <div className="block-list">
-                {state.blocks.map((block, blockIndex) => (
-                  <div className="block-card" key={`block-${blockIndex}`}>
-                    <div className="block-meta">
-                      <span>{block.type}</span>
-                      <span>conf: {(block.confidence || 0).toFixed(2)}</span>
-                    </div>
-                    {(block.lines || []).map((line, lineIndex) => (
-                      <input
-                        key={`line-${lineIndex}`}
-                        value={line.text}
-                        onChange={(event) =>
-                          updateLineText(blockIndex, lineIndex, event.target.value)
-                        }
-                      />
-                    ))}
+            <div className="block-list">
+              {state.blocks.map((block, blockIndex) => (
+                <div className="block-card" key={`block-${blockIndex}`}>
+                  <div className="block-meta">
+                    <span>{block.type}</span>
+                    <span>conf: {(block.confidence || 0).toFixed(2)}</span>
                   </div>
-                ))}
-              </div>
-            </>
+                  {(block.lines || []).map((line, lineIndex) => (
+                    <input
+                      key={`line-${lineIndex}`}
+                      value={line.text}
+                      onChange={(e) => updateLineText(blockIndex, lineIndex, e.target.value)}
+                    />
+                  ))}
+                </div>
+              ))}
+            </div>
           )}
         </section>
       </main>

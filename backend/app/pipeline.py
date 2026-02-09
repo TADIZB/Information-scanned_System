@@ -96,7 +96,7 @@ def warp_perspective(image: np.ndarray) -> WarpResult:
         [[0, 0], [max_width - 1, 0], [max_width - 1, max_height - 1], [0, max_height - 1]],
         dtype="float32",
     )
-    matrix = cv2.getPerspectiveTransform(rect, dst)
+    matrix = cv2.getPerspectiveTransform(rect, dst) # Đưa về HCN với tọa độ gốc
     warped = cv2.warpPerspective(image, matrix, (max_width, max_height))
     quad = rect.astype(int).tolist()
     return WarpResult(image=warped, quad=quad, used_warp=True)
@@ -106,19 +106,19 @@ def _group_words_into_lines(data: Dict[str, List[str]]) -> List[Dict[str, Any]]:
     lines: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for i, text in enumerate(data["text"]):
         if not text.strip():
-            continue
+            continue # Bỏ từ rỗng
         line_key = (data["block_num"][i], data["line_num"][i])
         left = int(data["left"][i])
         top = int(data["top"][i])
         width = int(data["width"][i])
         height = int(data["height"][i])
         conf = float(data["conf"][i]) if data["conf"][i] != "-1" else 0.0
-        if line_key not in lines:
+        if line_key not in lines: 
             lines[line_key] = {
                 "text": text,
                 "bbox": [left, top, left + width, top + height],
                 "conf": conf,
-            }
+            } # Lấy tọa độ từ đầu tiên làm khung cho cả dòng
         else:
             line = lines[line_key]
             line["text"] = f"{line['text']} {text}".strip()
@@ -147,4 +147,4 @@ def layout_and_ocr(image: np.ndarray) -> List[Dict[str, Any]]:
                 "confidence": line["conf"],
             }
         )
-    return blocks
+    return blocks # Trả về các block chữ với bbox để vẽ khung cam 

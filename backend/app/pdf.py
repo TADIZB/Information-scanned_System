@@ -11,7 +11,7 @@ from reportlab.pdfgen import canvas
 def _image_bbox_to_pdf(bbox: List[int], page_height: int) -> List[int]:
     x1, y1, x2, y2 = bbox
     pdf_y1 = page_height - y2
-    pdf_y2 = page_height - y1
+    pdf_y2 = page_height - y1 # Đảo trục y
     return [x1, pdf_y1, x2, pdf_y2]
 
 
@@ -19,7 +19,7 @@ def build_pdf(image_path: str, blocks: List[Dict[str, Any]]) -> bytes:
     image = Image.open(image_path).convert("RGB")
     width, height = image.size
     buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=(width, height))
+    pdf = canvas.Canvas(buffer, pagesize=(width, height)) # Tạo trang PDF cùng kích thước ảnh
 
     if not blocks:
         pdf.drawImage(ImageReader(image), 0, 0, width=width, height=height)
@@ -53,6 +53,7 @@ def build_pdf(image_path: str, blocks: List[Dict[str, Any]]) -> bytes:
                 line_bbox = line.get("bbox") or bbox
                 pdf_bbox = _image_bbox_to_pdf(line_bbox, height)
                 font_size = max(8, int((pdf_bbox[3] - pdf_bbox[1]) * 0.8))
+                # Giới hạn cỡ chữ tối thiểu là 8
                 pdf.setFont("Helvetica", font_size)
                 pdf.drawString(pdf_bbox[0], pdf_bbox[1], text)
 
