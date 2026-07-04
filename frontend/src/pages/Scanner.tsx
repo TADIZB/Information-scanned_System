@@ -87,9 +87,15 @@ const STEP_COLOR: Record<string, string> = {
   fail: "#ef4444",
 };
 
-// Nội dung tin nhắn mặc định khi gửi cho sinh viên (Teams/email, người dùng có thể sửa).
-const DEFAULT_MSG =
-  "Chào bạn, đây là thông báo từ phòng CTSV liên quan đến thẻ sinh viên của bạn.";
+// Nội dung liên lạc mặc định; ưu tiên tên gọi (từ cuối trong họ tên đầy đủ).
+const buildContactMessage = (info?: StudentInfo | null) => {
+  const fullName = (info?.full_name || info?.ho_va_ten || "").trim();
+  const rawName = fullName.split(/\s+/).filter(Boolean).pop() || "bạn";
+  const name = rawName.charAt(0).toLocaleUpperCase("vi-VN") + rawName.slice(1).toLocaleLowerCase("vi-VN");
+  return `Hi ${name},\nEm để quên thẻ sinh viên ở nhà B1. Em qua chỗ bác bảo vệ ở nhà B1 để lấy về nhé.`;
+};
+
+const DEFAULT_MSG = buildContactMessage();
 
 export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAccount = false, onLoginClick }: Props) {
   const webcamRef = useRef<Webcam>(null);
@@ -425,6 +431,7 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
         }
 
         setLastResult(result);
+        if (result.student_info) setMsgContent(buildContactMessage(result.student_info));
 
         if (scanMode === "ocr" && ocrEngine === "tesseract" && result.steps?.length) {
           animateSteps(result.steps);
@@ -605,6 +612,7 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
     try {
       const info = await lookupStudent(manualMssv.trim());
       setLookupResult(info);
+      setMsgContent(buildContactMessage(info));
       if (info.scan_id) loadHistory();
     } catch (err: any) {
       setLookupError(err?.response?.data?.detail || "Không tìm thấy sinh viên.");
