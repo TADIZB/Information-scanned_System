@@ -94,6 +94,10 @@ const DEFAULT_MSG =
 export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAccount = false, onLoginClick }: Props) {
   const webcamRef = useRef<Webcam>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const hardwareScannerInputRef = useRef<HTMLInputElement>(null);
+  const hardwareScannerBufferRef = useRef("");
+  const hardwareScannerLastKeyRef = useRef(0);
+  const hardwareScannerTimerRef = useRef<number | null>(null);
   const intervalRef = useRef<number | null>(null);
   const busyRef = useRef(false);
   const resultRef = useRef<HTMLDivElement>(null);
@@ -139,6 +143,7 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
   const [msgContent, setMsgContent] = useState(DEFAULT_MSG);
 
   const [manualMssv, setManualMssv] = useState("");
+  const [hardwareScanData, setHardwareScanData] = useState("");
   const [lookupResult, setLookupResult] = useState<LookupResult | null>(null);
   const [lookupError, setLookupError] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
@@ -176,6 +181,7 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
     setLookupResult(null);
     setLookupError("");
     setManualMssv("");
+    setHardwareScanData("");
     setAnalyzingPreview(null);
     setQrOverlayUrl(null);
     setMsgContent(DEFAULT_MSG);
@@ -471,6 +477,101 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
   }, []);
 
+  // Gửi dữ liệu OPN2006 vào cùng endpoint với QR camera để tra cứu, hiển thị
+  // thông tin sinh viên và lưu lịch sử. Ảnh trắng chỉ đáp ứng trường file bắt
+  // buộc; backend ưu tiên chuỗi qr_data_client do máy quét cung cấp.
+  const processHardwareScan = useCallback(async (rawData: string) => {
+    if (!rawData.trim() || busyRef.current) return;
+    stopAutoScan();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 480;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      setError("Trình duyệt không thể xử lý kết quả từ OPN2006.");
+      return;
+    }
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+    if (!blob) {
+      setError("Không thể gửi kết quả từ OPN2006.");
+      return;
+    }
+    await handleBlob(blob, false, rawData.trim());
+  }, [handleBlob, stopAutoScan]);
+
+  // OPN2006 ở chế độ HID gửi dữ liệu như bàn phím. Bắt phím ở cấp cửa sổ để
+  // kết quả vẫn vào đúng textbox khi một thành phần khác trên trang vừa lấy focus.
+  useEffect(() => {
+    if (scanMode !== "qr") return;
+    hardwareScannerInputRef.current?.focus();
+
+    const handleScannerKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+      const target = event.target as HTMLElement | null;
+      const isOtherEditable =
+        target !== hardwareScannerInputRef.current &&
+        (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable);
+      if (isOtherEditable) return;
+
+      if (event.key === "Enter" || event.key === "Tab") {
+        const scannedData = hardwareScannerBufferRef.current.trim();
+        if (scannedData) {
+          if (hardwareScannerTimerRef.current !== null) {
+            window.clearTimeout(hardwareScannerTimerRef.current);
+            hardwareScannerTimerRef.current = null;
+          }
+          setHardwareScanData(scannedData);
+          hardwareScannerBufferRef.current = "";
+          hardwareScannerLastKeyRef.current = 0;
+          void processHardwareScan(scannedData);
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key.length !== 1) return;
+
+      const now = performance.now();
+      hardwareScannerBufferRef.current =
+        // URL dài có thể bị ngắt nhịp khi React render lại liên kết. Chỉ coi là
+        // lượt quét mới sau một khoảng nghỉ đủ dài; Enter/Tab vẫn kết thúc ngay.
+        now - hardwareScannerLastKeyRef.current > 1500
+          ? event.key
+          : hardwareScannerBufferRef.current + event.key;
+      hardwareScannerLastKeyRef.current = now;
+      setHardwareScanData(hardwareScannerBufferRef.current);
+      hardwareScannerInputRef.current?.focus();
+
+      // Một số cấu hình OPN2006 không thêm Enter/Tab. Khi thiết bị ngừng gửi
+      // phím, tự xem chuỗi hiện tại là kết quả hoàn chỉnh và xử lý như QR ảnh.
+      if (hardwareScannerTimerRef.current !== null) {
+        window.clearTimeout(hardwareScannerTimerRef.current);
+      }
+      hardwareScannerTimerRef.current = window.setTimeout(() => {
+        const scannedData = hardwareScannerBufferRef.current.trim();
+        if (!scannedData) return;
+        setHardwareScanData(scannedData);
+        hardwareScannerBufferRef.current = "";
+        hardwareScannerLastKeyRef.current = 0;
+        hardwareScannerTimerRef.current = null;
+        void processHardwareScan(scannedData);
+      }, 600);
+      event.preventDefault();
+    };
+
+    window.addEventListener("keydown", handleScannerKey);
+    return () => {
+      window.removeEventListener("keydown", handleScannerKey);
+      if (hardwareScannerTimerRef.current !== null) {
+        window.clearTimeout(hardwareScannerTimerRef.current);
+        hardwareScannerTimerRef.current = null;
+      }
+    };
+  }, [scanMode, processHardwareScan]);
+
   // QR: tự bật auto-scan khi mount
   useEffect(() => {
     if (scanMode === "qr") startAutoScan();
@@ -581,6 +682,8 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
       </div>
     );
   };
+
+  const hardwareScanUrl = extractUrl(hardwareScanData);
 
   return (
     <div className="scanner-page">
@@ -746,11 +849,43 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
             Chụp thủ công
           </button>
         )}
-        <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileUpload} style={{ display: "none" }} />
+        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileUpload} style={{ display: "none" }} />
         <button className="ghost" onClick={() => fileInputRef.current?.click()}>
           Tải ảnh lên
         </button>
       </div>
+
+      {/* Ô hiển thị dữ liệu do OPN2006 nhập vào như bàn phím */}
+      {scanMode === "qr" && (
+        <div className="hardware-scanner">
+          <p className="hardware-scanner-label">Scan 1D</p>
+          {hardwareScanUrl ? (
+            <a
+              className="hardware-scanner-url"
+              href={hardwareScanUrl.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Mở ${hardwareScanUrl.href}`}
+            >
+              <span>{hardwareScanData}</span>
+              <span className="hardware-scanner-url-icon" aria-hidden="true">↗</span>
+            </a>
+          ) : (
+            <input
+              ref={hardwareScannerInputRef}
+              type="text"
+              className="hardware-scanner-input"
+              placeholder="Kết quả quét sẽ hiển thị tại đây..."
+              value={hardwareScanData}
+              readOnly
+              autoComplete="off"
+              autoFocus
+              spellCheck={false}
+              aria-label="Kết quả quét 1D"
+            />
+          )}
+        </div>
+      )}
 
       {/* ── Nhập MSSV thủ công */}
       {scanMode === "qr" && (

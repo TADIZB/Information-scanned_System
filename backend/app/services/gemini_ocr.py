@@ -19,8 +19,9 @@ _PROMPT = """Bạn là hệ thống trích xuất dữ liệu từ ảnh giấy 
 với đúng các khoá sau (không thêm khoá khác; trường nào không có thì để null):
 
 - ho_va_ten: họ và tên đầy đủ, GIỮ NGUYÊN dấu tiếng Việt
-- so_cccd: số CCCD/CMND (chỉ chữ số)
-- ngay_sinh: ngày sinh, định dạng dd/mm/yyyy
+- so_cccd: chỉ nhận đúng 12 chữ số nằm cạnh nhãn CCCD/Căn cước/Số định danh;
+  không dùng MSSV/Student ID hoặc chuỗi số không có nhãn làm CCCD
+- ngay_sinh: ngày hợp lệ, định dạng dd/mm/yyyy, nằm cạnh nhãn Ngày sinh/Date of birth/DOB
 - dia_chi: nơi thường trú / địa chỉ đầy đủ
 - sex: giới tính (Nam/Nữ)
 - nationality: quốc tịch
@@ -28,6 +29,9 @@ với đúng các khoá sau (không thêm khoá khác; trường nào không có
 - residence: nơi thường trú
 - expiry: ngày hết hạn (dd/mm/yyyy nếu có)
 - raw_text: toàn bộ văn bản đọc được trên ảnh (giữ ký tự xuống dòng)
+
+Họ tên phải là dòng tên người phù hợp gần nhãn/khu vực tên. Không chọn địa danh
+(ví dụ HÀ NỘI), tên trường, tên khoa hoặc các tiêu đề làm ho_va_ten.
 
 Chỉ in ra JSON, không giải thích, không bọc trong markdown."""
 
@@ -47,6 +51,21 @@ Trả về DUY NHẤT một object JSON với đúng các khoá sau:
 Chỉ in ra JSON, không giải thích thêm, không bọc trong markdown."""
 
 _FACE_VERDICTS = ("khop", "khong_khop", "khong_chac")
+
+
+def _enforce_document_rules(raw_text: str, values: dict) -> dict:
+    """Hậu kiểm dữ liệu AI bằng các quy tắc xác định, tránh model tự suy đoán."""
+    from app.pipeline import _is_non_name_text, extract_cccd_info
+
+    checked = dict(values)
+    deterministic = extract_cccd_info(raw_text)
+    checked["so_cccd"] = deterministic["so_cccd"]
+    checked["ngay_sinh"] = deterministic["ngay_sinh"]
+
+    name = str(checked.get("ho_va_ten") or "").strip()
+    if not name or _is_non_name_text(name):
+        checked["ho_va_ten"] = None
+    return checked
 
 
 def _client():
@@ -112,6 +131,7 @@ def extract_cccd_with_gemini(image_bytes: bytes, mime: str = "image/jpeg") -> tu
     raw_text = data.get("raw_text") or json.dumps(
         {k: v for k, v in cccd.items() if v}, ensure_ascii=False, indent=2
     )
+    cccd = _enforce_document_rules(raw_text, cccd)
     return raw_text, cccd
 
 

@@ -5,6 +5,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
@@ -947,6 +948,20 @@ _PLACE_NAME_PARTS = {
     "Bách", "Thành", "Hóa", "Hoá",
 }
 
+_NON_NAME_PHRASES = {
+    "HA NOI", "THANH PHO HA NOI", "HO CHI MINH", "THANH PHO HO CHI MINH",
+    "DAI HOC", "TRUONG DAI HOC", "THE SINH VIEN", "STUDENT ID CARD",
+    "CONG NGHE THONG TIN", "INFORMATION AND COMMUNICATIONS TECHNOLOGY",
+}
+
+
+def _is_non_name_text(value: str) -> bool:
+    """Loại địa danh, tên trường và tiêu đề thường bị nhầm thành họ tên."""
+    normalized = re.sub(r"\s+", " ", _strip_diacritics(value).upper()).strip()
+    if normalized in _NON_NAME_PHRASES:
+        return True
+    return any(phrase in normalized for phrase in _NON_NAME_PHRASES if len(phrase.split()) >= 3)
+
 # Sửa lỗi OCR phổ biến cho text tiếng Việt
 # Pattern: word-level substitution + character-level confusion in alphabetic context
 _OCR_TEXT_FIXES = [
@@ -1028,6 +1043,9 @@ def _score_name_candidate(name: str, y_norm: float, line_conf: float) -> float:
     if not words:
         return 0.0
 
+    if _is_non_name_text(name) or y_norm > 0.72:
+        return -100.0
+
     # Loại nếu BẤT KỲ từ nào trong blacklist (header label)
     # Check cả title case để bắt ALL CAPS header (TRƯỜNG → Trường ∈ blacklist)
     if any(w in _NAME_BLACKLIST or w.title() in _NAME_BLACKLIST for w in words):
@@ -1037,6 +1055,9 @@ def _score_name_candidate(name: str, y_norm: float, line_conf: float) -> float:
     # Có họ Việt phổ biến → +15 (chấp nhận title/upper/không dấu)
     if _is_vn_surname(words[0]):
         score += 15.0
+    else:
+        # Fallback không có nhãn chỉ được tin khi bắt đầu bằng một họ Việt Nam.
+        score -= 20.0
     # Bonus theo số từ (3-4 từ là tên Việt điển hình)
     if 3 <= len(words) <= 4:
         score += 8.0
@@ -1098,7 +1119,10 @@ def extract_student_info(
         )
         if name_match:
             cand = name_match.group(1).strip()
-            if not any(w in _NAME_BLACKLIST or w.title() in _NAME_BLACKLIST for w in cand.split()):
+            if (
+                not _is_non_name_text(cand)
+                and not any(w in _NAME_BLACKLIST or w.title() in _NAME_BLACKLIST for w in cand.split())
+            ):
                 full_name = cand
 
     # 2. Spatial scan qua từng line — chọn candidate điểm cao nhất
@@ -1113,7 +1137,7 @@ def extract_student_info(
                 y_norm = y_center / max(image_height, 1)
                 for cand in _iter_name_candidates(line_text):
                     sc = _score_name_candidate(cand, y_norm, line_conf)
-                    if sc > best_score:
+                    if sc >= 10.0 and sc > best_score:
                         best_score = sc
                         full_name = cand
 
@@ -1122,7 +1146,7 @@ def extract_student_info(
         best_score = -1.0
         for cand in _iter_name_candidates(text):
             sc = _score_name_candidate(cand, y_norm=0.3, line_conf=80.0)
-            if sc > best_score:
+            if sc >= 10.0 and sc > best_score:
                 best_score = sc
                 full_name = cand
 
@@ -1155,8 +1179,8 @@ def extract_student_info(
 
 # ─── CCCD VN extraction ─────────────────────────────────────────────────────
 
-# Số CCCD: 12 chữ số (CCCD mới gắn chip) hoặc 9 chữ số (CMND cũ)
-_CCCD_NUMBER_RE = re.compile(r"\b(\d{12}|\d{9})\b")
+# CCCD mới phải có đúng 12 chữ số. Không lấy MSSV/chuỗi số bất kỳ làm fallback.
+_CCCD_NUMBER_RE = re.compile(r"(?<!\d)(\d{12})(?!\d)")
 
 # Ngày dd/mm/yyyy hoặc dd-mm-yyyy, dd.mm.yyyy
 _DATE_RE = re.compile(r"\b(\d{1,2}[/\-.\s]\d{1,2}[/\-.\s]\d{4})\b")
@@ -1170,6 +1194,40 @@ def _normalize_date(s: str | None) -> str | None:
         return s.strip()
     d, mo, y = m.groups()
     return f"{int(d):02d}/{int(mo):02d}/{y}"
+
+
+def _text_near_label(
+    text: str,
+    label_pattern: str,
+    *,
+    following_lines: int = 1,
+) -> str | None:
+    """Lấy phần cùng dòng và tối đa `following_lines` dòng ngay sau nhãn."""
+    lines = text.splitlines()
+    label_rx = re.compile(label_pattern, re.IGNORECASE)
+    for index, line in enumerate(lines):
+        match = label_rx.search(line)
+        if not match:
+            continue
+        nearby = [re.sub(r"^[\s:/\-.]+", "", line[match.end():]).strip()]
+        nearby.extend(ln.strip() for ln in lines[index + 1:index + 1 + following_lines])
+        return " ".join(part for part in nearby if part) or None
+    return None
+
+
+def _valid_birth_date(value: str | None) -> str | None:
+    """Chuẩn hoá và chỉ nhận ngày lịch hợp lệ, không ở tương lai."""
+    normalized = _normalize_date(value)
+    if not normalized:
+        return None
+    try:
+        day, month, year = (int(part) for part in normalized.split("/"))
+        parsed = date(year, month, day)
+    except (TypeError, ValueError):
+        return None
+    if year < 1900 or parsed > date.today():
+        return None
+    return normalized
 
 
 def _line_after_label(text: str, label_pattern: str, *, multiline: bool = False) -> str | None:
@@ -1220,23 +1278,27 @@ def extract_cccd_info(
     text = fix_ocr_text(raw_text)
 
     cccd_number = None
-    cands = _CCCD_NUMBER_RE.findall(text)
-    if cands:
-        twelve = [c for c in cands if len(c) == 12]
-        nine = [c for c in cands if len(c) == 9]
-        cccd_number = (twelve or nine)[0]
+    cccd_near_label = _text_near_label(
+        text,
+        r"CCCD|Căn\s+cước(?:\s+công\s+dân)?|Số\s+(?:căn\s+cước|định\s+danh)|"
+        r"Personal\s+identification|Số\s*/\s*No\. ?",
+    )
+    if cccd_near_label:
+        number_match = _CCCD_NUMBER_RE.search(cccd_near_label)
+        if number_match:
+            cccd_number = number_match.group(1)
 
     full_name = None
     raw_name = _line_after_label(text, r"Họ\s+và\s+tên|Họ\s+tên|Full\s*name")
     if raw_name:
         # CCCD tên thường ALL CAPS → chỉ lấy cụm 2..5 từ ALL CAPS đầu
         m = re.search(rf"({_NAME_WORD_UPPER}(?:\s+{_NAME_WORD_UPPER}){{1,4}})", raw_name)
-        if m:
+        if m and not _is_non_name_text(m.group(1)):
             full_name = _title_case_vn(m.group(1))
         else:
             # Trường hợp title-case
             m2 = re.search(rf"({_NAME_WORD_TITLE}(?:\s+{_NAME_WORD_TITLE}){{1,4}})", raw_name)
-            if m2:
+            if m2 and not _is_non_name_text(m2.group(1)):
                 full_name = m2.group(1)
 
     if not full_name and blocks and image_height:
@@ -1251,25 +1313,20 @@ def extract_cccd_info(
                 y_norm = y_center / max(image_height, 1)
                 for cand in _iter_name_candidates(line_text):
                     sc = _score_name_candidate(cand, y_norm, line_conf)
-                    if sc > best_score:
+                    if sc >= 10.0 and sc > best_score:
                         best_score = sc
                         full_name = cand
         if full_name and full_name.isupper():
             full_name = _title_case_vn(full_name)
 
-    birth_raw = _line_after_label(
+    birth_raw = _text_near_label(
         text, r"Ngày[,\s]*tháng[,\s]*năm\s+sinh|Ngày\s+sinh|Date\s+of\s+birth|DOB"
     )
     birth_date = None
     if birth_raw:
         m = _DATE_RE.search(birth_raw)
         if m:
-            birth_date = _normalize_date(m.group(1))
-    if not birth_date:
-        # fallback: lấy date đầu tiên trong text (CCCD thường có 2 date: sinh + hết hạn)
-        all_dates = _DATE_RE.findall(text)
-        if all_dates:
-            birth_date = _normalize_date(all_dates[0])
+            birth_date = _valid_birth_date(m.group(1))
 
     sex_raw = _line_after_label(text, r"Giới\s+tính|Sex")
     sex = None
