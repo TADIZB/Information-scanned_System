@@ -129,6 +129,9 @@ async def process_scan(
         raw_data = await file.read()
 
         if scan_mode == "qr":
+            # QR server fallback: client thường đã đọc QR trước. Nếu client gửi
+            # qr_data_client thì ưu tiên dùng ngay; nếu không có, server thử lại
+            # trên ảnh gốc và ảnh đã warp phối cảnh.
             image = resize_image(load_image(raw_data), max_dim=1400)
             cv_image = pil_to_cv(image)
             warped = warp_perspective(cv_image)
@@ -136,8 +139,10 @@ async def process_scan(
 
             qr_data = qr_data_client.strip() if qr_data_client and qr_data_client.strip() else None
             if not qr_data:
+                # Thử toàn ảnh trước để không mất dữ liệu khi warp/crop thất bại.
                 qr_data = detect_qr(cv_image)
             if not qr_data:
+                # Nếu toàn ảnh không đọc được, thử ảnh đã hiệu chỉnh phối cảnh.
                 qr_data = detect_qr(warped.image)
             if not qr_data:
                 logger.warning(
@@ -398,7 +403,8 @@ async def process_scan(
         
         steps: List[Dict[str, Any]] = []
 
-        # Bước 1: Tải & tiền xử lý
+        # Bước 1 OCR: tải ảnh, sửa EXIF, chuyển RGB->BGR và giới hạn cạnh dài
+        # nhất 1400px. Đây là điểm vào của thuật toán OCR Tesseract.
         try:
             image = resize_image(load_image(raw_data), max_dim=1400)
             cv_image = pil_to_cv(image)
@@ -417,13 +423,17 @@ async def process_scan(
             raise HTTPException(status_code=422, detail="Không đọc được file ảnh.")
 
         try:
+            # Pipeline này sinh ảnh trung gian để hiển thị từng bước xử lý OCR
+            # (bbox, warp, denoise, flat-field, threshold, morphology, deskew).
+            # Biến cleaned chủ yếu dùng để minh hoạ; OCR thật chạy trên warped_bgr.
             cleaned, intermediates = preprocess_cccd_pipeline(cv_image)
         except Exception as exc:
             steps.append({"name": "Pipeline tiền xử lý", "status": "fail",
                           "description": str(exc), "image_url": None})
             raise HTTPException(status_code=422, detail=f"Lỗi tiền xử lý: {exc}")
 
-        # Lưu ảnh ROI đã warp (step2_roi) để hiển thị + lưu DB
+        # Lưu ảnh ROI đã warp (step2_roi) để hiển thị + lưu DB. Đây là ảnh được
+        # đưa vào Tesseract, vì morphology/threshold mạnh có thể phá dấu tiếng Việt.
         warped_bgr = intermediates["step2_roi"]
         warped_bytes = _warped_to_png_bytes(warped_bgr)
 
@@ -530,12 +540,16 @@ async def process_scan(
             raise HTTPException(status_code=422, detail="Lỗi khi nhận dạng văn bản.")
 
         # ── Bóc tách CCCD & đối chiếu sinh viên ──────────────────────────────
+        # extract_cccd_info dùng luật deterministic: số CCCD/ngày sinh phải gần
+        # nhãn, tên giới hạn 2..5 từ, có fallback theo bbox nếu OCR dòng bị vỡ.
         cccd = extract_cccd_info(
             raw_text,
             blocks=blocks,
             image_height=warped_bgr.shape[0],
         )
 
+        # Đối chiếu không dùng số CCCD để tìm sinh viên; dùng họ tên OCR + ngày
+        # sinh với fuzzy matching. Ngày sinh trùng cho phép ngưỡng tên thấp hơn.
         student, match_note = _match_student_by_cccd(
             db,
             full_name=cccd.get("ho_va_ten"),

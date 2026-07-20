@@ -2,8 +2,6 @@
 .env.*
 !.env.example
 
-CLAUDE.md
-
 .venv/
 __pycache__/
 *.pyc
@@ -37,7 +35,6 @@ yarn-error.log*
 Thumbs.db
 desktop.ini
 
-.claude/
 skills-lock.json
 
 deploy.py

@@ -79,7 +79,7 @@ npm run dev       # https://localhost:3000 (cert tự ký — accept ở browser
 ```
 
 ### Schema DB
-Schema khởi tạo bằng SQL chạy tay trong pgAdmin4 (xem CLAUDE.md hoặc liên hệ tác giả để có file SQL khởi tạo).
+Schema khởi tạo bằng SQL chạy tay trong pgAdmin4 (xem `setup.md` và `postgres.md`).
 
 ---
 

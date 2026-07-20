@@ -1,4 +1,4 @@
-"""Auth tối giản: 2 cách đăng ký (email @hust.edu.vn hoặc username) + cookie user_id.
+"""Auth tối giản: đăng ký/đăng nhập bằng email hoặc username + cookie user_id.
 
 Không JWT, không refresh token, không sessions DB, không Google OAuth, không pepper.
 Mật khẩu: bcrypt thuần + check độ dài tối thiểu + chặn mật khẩu phổ biến.
@@ -18,11 +18,6 @@ from .models import User
 
 # ─── Cấu hình ────────────────────────────────────────────────────────────────
 
-HUST_EMAIL_DOMAINS = ("@sis.hust.edu.vn", "@hust.edu.vn")
-_HUST_EMAIL_RE = re.compile(
-    r"^[A-Za-z0-9._%+-]+@(?:sis\.)?hust\.edu\.vn$", re.IGNORECASE
-)
-
 # Email thường (dùng cho tài khoản thường + quên mật khẩu): định dạng email hợp lệ chung.
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
@@ -30,11 +25,8 @@ _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,50}$")
 
 COOKIE_NAME = "user_id"
+AUTH_PROVIDER_COOKIE_NAME = "auth_provider"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 7  # 7 ngày
-
-
-def is_hust_email(s: str) -> bool:
-    return bool(_HUST_EMAIL_RE.match(s.strip()))
 
 
 def is_valid_username(s: str) -> bool:
@@ -81,10 +73,18 @@ def validate_password_strength(plain: str) -> None:
 
 # ─── Cookie helpers ──────────────────────────────────────────────────────────
 
-def _set_user_cookie(response: Response, user_id: uuid.UUID) -> None:
+def _set_user_cookie(response: Response, user_id: uuid.UUID, auth_provider: str) -> None:
     response.set_cookie(
         key=COOKIE_NAME,
         value=str(user_id),
+        httponly=True,
+        samesite="lax",
+        max_age=COOKIE_MAX_AGE,
+        path="/",
+    )
+    response.set_cookie(
+        key=AUTH_PROVIDER_COOKIE_NAME,
+        value=auth_provider,
         httponly=True,
         samesite="lax",
         max_age=COOKIE_MAX_AGE,
@@ -94,15 +94,17 @@ def _set_user_cookie(response: Response, user_id: uuid.UUID) -> None:
 
 def _clear_user_cookie(response: Response) -> None:
     response.delete_cookie(COOKIE_NAME, path="/")
+    response.delete_cookie(AUTH_PROVIDER_COOKIE_NAME, path="/")
 
 
-def _user_to_dict(user: User) -> dict:
+def _user_to_dict(user: User, auth_provider: str | None = None) -> dict:
     return {
         "id": str(user.id),
         "username": user.username,
         "email": user.email,
         "full_name": user.full_name,
         "birth_date": user.birth_date,
+        "auth_provider": auth_provider,
     }
 
 
@@ -154,8 +156,8 @@ def register_local(
     db.add(user)
     db.commit()
     db.refresh(user)
-    _set_user_cookie(response, user.id)
-    return {"message": "Đăng ký thành công.", **_user_to_dict(user)}
+    _set_user_cookie(response, user.id, "local")
+    return {"message": "Đăng ký thành công.", **_user_to_dict(user, "local")}
 
 
 def reset_user_password(email: str, new_password: str, db: DBSession) -> User:
@@ -193,8 +195,8 @@ def login_user(
     if not user or not user.password_hash or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Sai tài khoản hoặc mật khẩu.")
 
-    _set_user_cookie(response, user.id)
-    return {"message": "Đăng nhập thành công.", **_user_to_dict(user)}
+    _set_user_cookie(response, user.id, "local")
+    return {"message": "Đăng nhập thành công.", **_user_to_dict(user, "local")}
 
 
 def get_or_create_hust_user(email: str, db: DBSession) -> User:
@@ -232,8 +234,8 @@ def login_hust_user(email: str, response: Response, db: DBSession) -> dict:
     hàm này — tới đây nghĩa là thông tin đăng nhập đã hợp lệ.
     """
     user = get_or_create_hust_user(email, db)
-    _set_user_cookie(response, user.id)
-    return {"message": "Đăng nhập thành công.", **_user_to_dict(user)}
+    _set_user_cookie(response, user.id, "microsoft")
+    return {"message": "Đăng nhập thành công.", **_user_to_dict(user, "microsoft")}
 
 
 def logout_user(response: Response) -> dict:

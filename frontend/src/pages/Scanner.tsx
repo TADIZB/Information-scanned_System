@@ -3,6 +3,7 @@ import Webcam from "react-webcam";
 import jsQR from "jsqr";
 import {
   API_BASE,
+  api,
   getScanDetail,
   getScanHistory,
   FaceMatch,
@@ -21,8 +22,8 @@ interface Props {
   onScanSuccess: (result: ScanResult) => void;
   scanMode: "qr" | "ocr";
   isLoggedIn: boolean;
-  // Chỉ tài khoản trường (@sis.hust.edu.vn hoặc @hust.edu.vn) mới được gửi thông báo qua Teams/Outlook.
-  isHustAccount?: boolean;
+  isMicrosoftAccount?: boolean;
+  currentUserEmail?: string | null;
   onLoginClick?: () => void;
 }
 
@@ -97,7 +98,14 @@ const buildContactMessage = (info?: StudentInfo | null) => {
 
 const DEFAULT_MSG = buildContactMessage();
 
-export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAccount = false, onLoginClick }: Props) {
+export default function Scanner({
+  onScanSuccess,
+  scanMode,
+  isLoggedIn,
+  isMicrosoftAccount = false,
+  currentUserEmail = null,
+  onLoginClick,
+}: Props) {
   const webcamRef = useRef<Webcam>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hardwareScannerInputRef = useRef<HTMLInputElement>(null);
@@ -161,6 +169,9 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
   const [selected, setSelected] = useState<ScanDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [showDetailImage, setShowDetailImage] = useState(false);
+  const [detailImageUrl, setDetailImageUrl] = useState<string | null>(null);
+  const [detailImageLoading, setDetailImageLoading] = useState(false);
+  const [detailImageError, setDetailImageError] = useState("");
 
   const loadHistory = useCallback(() => {
     if (!isLoggedIn) {
@@ -196,9 +207,49 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
   const openDetail = async (id: string) => {
     setLoadingDetail(true);
     setShowDetailImage(false);
+    setDetailImageError("");
+    setDetailImageUrl((cur) => {
+      if (cur) URL.revokeObjectURL(cur);
+      return null;
+    });
     try { setSelected(await getScanDetail(id)); }
     catch { /* ignore */ }
     finally { setLoadingDetail(false); }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (detailImageUrl) URL.revokeObjectURL(detailImageUrl);
+    };
+  }, [detailImageUrl]);
+
+  const loadDetailImage = async (imageUrl: string) => {
+    setShowDetailImage(true);
+    setDetailImageLoading(true);
+    setDetailImageError("");
+    setDetailImageUrl((cur) => {
+      if (cur) URL.revokeObjectURL(cur);
+      return null;
+    });
+    try {
+      const res = await api.get<Blob>(imageUrl, { responseType: "blob" });
+      setDetailImageUrl(URL.createObjectURL(res.data));
+    } catch (err: any) {
+      setDetailImageError(err?.response?.data?.detail || "Không tải được ảnh đã quét.");
+    } finally {
+      setDetailImageLoading(false);
+    }
+  };
+
+  const closeDetail = () => {
+    setSelected(null);
+    setShowDetailImage(false);
+    setDetailImageLoading(false);
+    setDetailImageError("");
+    setDetailImageUrl((cur) => {
+      if (cur) URL.revokeObjectURL(cur);
+      return null;
+    });
   };
 
   const getImageUrl = (imageUrl: string | null) => {
@@ -210,7 +261,7 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
   // Mở Teams (app/web) tới khung chat với sinh viên, điền sẵn nội dung.
   // Teams cần email/UPN hợp lệ (không nhận MSSV trơn) nên đòi student_info.email.
   const sendTeamsChat = (info: StudentInfo) => {
-    if (!isHustAccount || !info.email || !msgContent.trim()) return;
+    if (!isMicrosoftAccount || !info.email || !msgContent.trim()) return;
     const message = encodeURIComponent(`${msgContent.trim()} (MSSV ${info.student_id ?? ""})`.trim());
     const users = encodeURIComponent(info.email);
     window.open(
@@ -220,32 +271,34 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
     );
   };
 
-  // Mở trình email mặc định (mailto) với người nhận + tiêu đề + nội dung soạn sẵn.
-  // Dùng thẻ <a> ẩn thay vì window.open để tránh để lại tab trắng trên Chrome.
-  const sendEmail = (info: StudentInfo) => {
-    if (!isHustAccount || !info.email || !msgContent.trim()) return;
+  const sendGmail = (info: StudentInfo) => {
+    if (!currentUserEmail || !info.email || !msgContent.trim()) return;
     const subject = encodeURIComponent(`[HUST] Thông báo về thẻ sinh viên ${info.student_id ?? ""}`.trim());
     const greet = info.full_name || info.ho_va_ten || `bạn sinh viên có mã số ${info.student_id ?? ""}`;
-    const body = encodeURIComponent(`Chào ${greet},\n\n${msgContent.trim()}\n\nTrân trọng.`);
-    const a = document.createElement("a");
-    a.href = `mailto:${info.email}?subject=${subject}&body=${body}`;
-    a.click();
+    const body = encodeURIComponent(
+      `Chào ${greet},\n\n${msgContent.trim()}\n\nEmail liên hệ: ${currentUserEmail}\n\nTrân trọng.`
+    );
+    window.open(
+      `https://mail.google.com/mail/?authuser=${encodeURIComponent(currentUserEmail)}&view=cm&fs=1&to=${encodeURIComponent(info.email)}&su=${subject}&body=${body}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
   };
 
-  // Khối soạn + 2 nút gửi (Teams/email). Chỉ render khi sinh viên có email.
-  // Chỉ tài khoản trường mới được gửi — tài khoản thường bị chặn.
+  // Khối soạn + nút gửi liên hệ. Tài khoản Microsoft có thêm Teams;
+  // tài khoản thường chỉ dùng Gmail với email đã đăng ký.
   const renderMessageActions = (info: StudentInfo) => {
     if (!info.email) return null;
+    const canUseGmail = !!currentUserEmail && !!msgContent.trim();
     return (
       <div className="raw-section teams-send">
         <p className="raw-label">Gửi tin nhắn cho sinh viên</p>
         <p className="teams-send-to">
           Người nhận: <strong>{info.email}</strong>
         </p>
-        {!isHustAccount && (
-          <p className="teams-locked-note">
-            🔒 Cần đăng nhập bằng <strong>tài khoản trường (@sis.hust.edu.vn hoặc @hust.edu.vn)</strong> để
-            gửi thông báo qua Teams/Outlook.
+        {currentUserEmail && (
+          <p className="teams-send-to">
+            Email liên hệ: <strong>{currentUserEmail}</strong>
           </p>
         )}
         <textarea
@@ -254,26 +307,27 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
           onChange={(e) => setMsgContent(e.target.value)}
           rows={3}
           placeholder="Nội dung tin nhắn gửi tới sinh viên..."
-          disabled={!isHustAccount}
+          disabled={!isLoggedIn}
         />
         <div className="teams-actions">
-          <button
-            type="button"
-            className="teams-btn"
-            disabled={!isHustAccount || !msgContent.trim()}
-            title={!isHustAccount ? "Chỉ dùng được với tài khoản trường (@sis.hust.edu.vn hoặc @hust.edu.vn)" : undefined}
-            onClick={() => sendTeamsChat(info)}
-          >
-            💬 Gửi qua Teams
-          </button>
+          {isMicrosoftAccount && (
+            <button
+              type="button"
+              className="teams-btn"
+              disabled={!msgContent.trim()}
+              onClick={() => sendTeamsChat(info)}
+            >
+              💬 Gửi qua Teams
+            </button>
+          )}
           <button
             type="button"
             className="teams-btn email-btn"
-            disabled={!isHustAccount || !msgContent.trim()}
-            title={!isHustAccount ? "Chỉ dùng được với tài khoản trường (@sis.hust.edu.vn hoặc @hust.edu.vn)" : undefined}
-            onClick={() => sendEmail(info)}
+            disabled={!canUseGmail}
+            title={!currentUserEmail ? "Tài khoản chưa có email đăng ký" : undefined}
+            onClick={() => sendGmail(info)}
           >
-            ✉️ Gửi email
+            ✉️ Gửi qua Gmail
           </button>
         </div>
       </div>
@@ -301,6 +355,10 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = async () => {
+        // Bước 1 QR (client): chuẩn hoá frame trước khi giải mã.
+        // Công thức trong thuyết minh: s = min(1, 1200 / W).
+        // Nếu ảnh camera quá rộng, chỉ thu nhỏ theo chiều rộng và giữ nguyên tỉ lệ
+        // để mã QR không bị méo; 1200px là ngưỡng cân bằng giữa tốc độ và độ nét.
         const MAX_W = 1200;
         const scale = img.width > MAX_W ? MAX_W / img.width : 1;
         const w = Math.round(img.width * scale);
@@ -313,11 +371,16 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
         ctx.drawImage(img, 0, 0, w, h);
         try {
           const imageData = ctx.getImageData(0, 0, w, h);
+          // Bước 2 QR: jsQR đọc trực tiếp mảng RGBA của Canvas.
+          // attemptBoth giúp thử cả QR nền sáng/chữ tối và trường hợp bị đảo sáng-tối.
           const code = jsQR(imageData.data, imageData.width, imageData.height, {
             inversionAttempts: "attemptBoth",
           });
           if (!code?.data) {
             try {
+              // Fallback ZXing: dùng thêm một bộ giải mã khác vì mỗi thư viện có
+              // cách phát hiện finder pattern/quiet zone khác nhau. Nhánh này chỉ
+              // trả về dữ liệu QR; không crop được vì ZXing ở đây không dùng corner.
               if (!zxingReaderRef.current) {
                 const { BrowserQRCodeReader } = await import("@zxing/browser");
                 zxingReaderRef.current = new BrowserQRCodeReader();
@@ -336,6 +399,8 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
             code.location.bottomRightCorner,
             code.location.bottomLeftCorner,
           ];
+          // jsQR trả góc trong hệ toạ độ Canvas đã scale; chia lại cho scale để
+          // cắt đúng vùng trên ảnh gốc có độ phân giải cao hơn.
           const xs = points.map((p) => p.x / scale);
           const ys = points.map((p) => p.y / scale);
           const minX = Math.max(0, Math.min(...xs));
@@ -344,12 +409,17 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
           const maxY = Math.min(img.height, Math.max(...ys));
           const qrW = Math.max(1, maxX - minX);
           const qrH = Math.max(1, maxY - minY);
+          // Bước 3 QR: mở rộng vùng cắt p = 0.65 * max(Wqr, Hqr).
+          // Đây là heuristic để giữ quiet zone/nền xung quanh và tránh cắt sát biên
+          // khi góc phát hiện hơi lệch; không phải hằng số chuẩn của QR.
           const pad = Math.max(qrW, qrH) * 0.65;
 
           const cropX = Math.max(0, Math.floor(minX - pad));
           const cropY = Math.max(0, Math.floor(minY - pad));
           const cropW = Math.min(img.width - cropX, Math.ceil(qrW + pad * 2));
           const cropH = Math.min(img.height - cropY, Math.ceil(qrH + pad * 2));
+          // Phóng crop sao cho cạnh dài nhất tối thiểu 1000px trước khi gửi server.
+          // Ảnh nhỏ được phóng lên để OpenCV/pyzbar phía server còn đủ module QR để đọc.
           const targetLongest = 1000;
           const cropScale = Math.max(1, targetLongest / Math.max(cropW, cropH));
 
@@ -371,6 +441,7 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
               });
             },
             "image/jpeg",
+            // JPEG quality 0.92 giữ cạnh ô QR đủ sắc nhưng payload nhỏ hơn PNG/raw frame.
             0.92,
           );
         } catch {
@@ -509,48 +580,56 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
     await handleBlob(blob, false, rawData.trim());
   }, [handleBlob, stopAutoScan]);
 
+  const submitHardwareScan = useCallback((rawData: string) => {
+    const scannedData = rawData.trim();
+    if (!scannedData) return;
+    if (hardwareScannerTimerRef.current !== null) {
+      window.clearTimeout(hardwareScannerTimerRef.current);
+      hardwareScannerTimerRef.current = null;
+    }
+    hardwareScannerBufferRef.current = "";
+    hardwareScannerLastKeyRef.current = 0;
+    setHardwareScanData(scannedData);
+    void processHardwareScan(scannedData);
+  }, [processHardwareScan]);
+
   // OPN2006 ở chế độ HID gửi dữ liệu như bàn phím. Bắt phím ở cấp cửa sổ để
   // kết quả vẫn vào đúng textbox khi một thành phần khác trên trang vừa lấy focus.
   useEffect(() => {
     if (scanMode !== "qr") return;
-    hardwareScannerInputRef.current?.focus();
 
     const handleScannerKey = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.altKey || event.metaKey) return;
 
       const target = event.target as HTMLElement | null;
-      const isOtherEditable =
-        target !== hardwareScannerInputRef.current &&
-        (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable);
-      if (isOtherEditable) return;
+      const isEditableTarget =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        !!target?.isContentEditable;
+      if (isEditableTarget && target !== hardwareScannerInputRef.current) return;
 
       if (event.key === "Enter" || event.key === "Tab") {
         const scannedData = hardwareScannerBufferRef.current.trim();
-        if (scannedData) {
-          if (hardwareScannerTimerRef.current !== null) {
-            window.clearTimeout(hardwareScannerTimerRef.current);
-            hardwareScannerTimerRef.current = null;
-          }
-          setHardwareScanData(scannedData);
-          hardwareScannerBufferRef.current = "";
-          hardwareScannerLastKeyRef.current = 0;
-          void processHardwareScan(scannedData);
+        if (scannedData.length >= 6) {
+          submitHardwareScan(scannedData);
           event.preventDefault();
         }
+        hardwareScannerBufferRef.current = "";
+        hardwareScannerLastKeyRef.current = 0;
         return;
       }
       if (event.key.length !== 1) return;
 
       const now = performance.now();
+      const gap = now - hardwareScannerLastKeyRef.current;
       hardwareScannerBufferRef.current =
-        // URL dài có thể bị ngắt nhịp khi React render lại liên kết. Chỉ coi là
-        // lượt quét mới sau một khoảng nghỉ đủ dài; Enter/Tab vẫn kết thúc ngay.
-        now - hardwareScannerLastKeyRef.current > 1500
+        // HID scanner gửi dữ liệu như bàn phím. Không lọc quá chặt theo tốc độ
+        // vì một số thiết bị/driver gửi chậm; chỉ coi là lượt mới sau khi nghỉ lâu.
+        !hardwareScannerLastKeyRef.current || gap > 2000
           ? event.key
           : hardwareScannerBufferRef.current + event.key;
       hardwareScannerLastKeyRef.current = now;
       setHardwareScanData(hardwareScannerBufferRef.current);
-      hardwareScannerInputRef.current?.focus();
 
       // Một số cấu hình OPN2006 không thêm Enter/Tab. Khi thiết bị ngừng gửi
       // phím, tự xem chuỗi hiện tại là kết quả hoàn chỉnh và xử lý như QR ảnh.
@@ -559,25 +638,25 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
       }
       hardwareScannerTimerRef.current = window.setTimeout(() => {
         const scannedData = hardwareScannerBufferRef.current.trim();
-        if (!scannedData) return;
-        setHardwareScanData(scannedData);
+        if (scannedData.length >= 6) {
+          submitHardwareScan(scannedData);
+          return;
+        }
         hardwareScannerBufferRef.current = "";
         hardwareScannerLastKeyRef.current = 0;
-        hardwareScannerTimerRef.current = null;
-        void processHardwareScan(scannedData);
-      }, 600);
+      }, 700);
       event.preventDefault();
     };
 
-    window.addEventListener("keydown", handleScannerKey);
+    document.addEventListener("keydown", handleScannerKey, true);
     return () => {
-      window.removeEventListener("keydown", handleScannerKey);
+      document.removeEventListener("keydown", handleScannerKey, true);
       if (hardwareScannerTimerRef.current !== null) {
         window.clearTimeout(hardwareScannerTimerRef.current);
         hardwareScannerTimerRef.current = null;
       }
     };
-  }, [scanMode, processHardwareScan]);
+  }, [scanMode, submitHardwareScan]);
 
   // QR: tự bật auto-scan khi mount
   useEffect(() => {
@@ -707,10 +786,10 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
         </h2>
         <p className="scanner-head-sub">
           {scanMode === "qr"
-            ? "Đưa mã QR trên thẻ vào khung — hệ thống tự động phát hiện và đối chiếu."
+            ? "Đưa mã QR trên thẻ vào khung"
             : ocrEngine === "gemini"
-              ? "Đưa CCCD vào khung rồi chụp — AI bóc tách thông tin."
-              : "Đưa CCCD vào khung rồi chụp — pipeline trích xuất thông tin."}
+              ? "Đưa CCCD vào khung rồi chụp"
+              : "Đưa CCCD vào khung rồi chụp"}
         </p>
 
         {/* Chọn engine xử lý (chỉ OCR) */}
@@ -866,8 +945,19 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
       {/* Ô hiển thị dữ liệu do OPN2006 nhập vào như bàn phím */}
       {scanMode === "qr" && (
         <div className="hardware-scanner">
-          <p className="hardware-scanner-label">Scan 1D</p>
-          {hardwareScanUrl ? (
+          <p className="hardware-scanner-label">Scan HID</p>
+          <input
+            ref={hardwareScannerInputRef}
+            type="text"
+            className="hardware-scanner-input"
+            placeholder="Kết quả hiển thị tại đây..."
+            value={hardwareScanData}
+            readOnly
+            autoComplete="off"
+            spellCheck={false}
+            aria-label="Kết quả quét HID"
+          />
+          {hardwareScanUrl && (
             <a
               className="hardware-scanner-url"
               href={hardwareScanUrl.href}
@@ -878,19 +968,6 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
               <span>{hardwareScanData}</span>
               <span className="hardware-scanner-url-icon" aria-hidden="true">↗</span>
             </a>
-          ) : (
-            <input
-              ref={hardwareScannerInputRef}
-              type="text"
-              className="hardware-scanner-input"
-              placeholder="Kết quả quét sẽ hiển thị tại đây..."
-              value={hardwareScanData}
-              readOnly
-              autoComplete="off"
-              autoFocus
-              spellCheck={false}
-              aria-label="Kết quả quét 1D"
-            />
           )}
         </div>
       )}
@@ -989,6 +1066,7 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
             )}
             {lastResult.student_info && renderStudentInfo(lastResult.student_info)}
           </div>
+          {lastResult.face_match && renderFaceMatch(lastResult.face_match)}
           <div className="raw-section">
             <p className="raw-label">KET QUA PHAN TICH OCR</p>
             <pre className="raw-pre">{lastResult.raw_text || "Khong doc duoc van ban nao."}</pre>
@@ -1144,9 +1222,9 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
 
       {/*Modal chi tiết*/}
       {(selected || loadingDetail) && (
-        <div className="modal-overlay" onClick={() => setSelected(null)}>
+        <div className="modal-overlay" onClick={closeDetail}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <button className="modal-close" onClick={() => setSelected(null)}>✕</button>
+            <button className="modal-close" onClick={closeDetail}>✕</button>
             {loadingDetail ? (
               <p className="hint">Đang tải chi tiết...</p>
             ) : selected ? (
@@ -1164,12 +1242,18 @@ export default function Scanner({ onScanSuccess, scanMode, isLoggedIn, isHustAcc
                   </div>
                 </div>
                 {selected.image_url && !showDetailImage && (
-                  <button className="ghost" type="button" onClick={() => setShowDetailImage(true)}>
-                    Xem anh da quet
+                  <button className="ghost" type="button" onClick={() => loadDetailImage(selected.image_url!)}>
+                    Xem ảnh
                   </button>
                 )}
-                {selected.image_url && showDetailImage && (
-                  <img src={getImageUrl(selected.image_url) ?? undefined} alt="Anh da quet" className="modal-image" loading="lazy" />
+                {selected.image_url && showDetailImage && detailImageLoading && (
+                  <p className="hint">Đang tải ảnh...</p>
+                )}
+                {selected.image_url && showDetailImage && detailImageError && (
+                  <div className="banner error">{detailImageError}</div>
+                )}
+                {selected.image_url && showDetailImage && detailImageUrl && (
+                  <img src={detailImageUrl} alt="Ảnh đã quét" className="modal-image" loading="lazy" />
                 )}
                 {selected.student_info
                   ? renderStudentInfo(selected.student_info)

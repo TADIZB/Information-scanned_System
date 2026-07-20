@@ -2,14 +2,59 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import or_
 from sqlalchemy.orm import Session as DBSession
 
-from ..auth import get_optional_user
+from ..auth import get_current_user, get_optional_user
 from ..database import get_db
 from ..models import ScanHistory, Student, StudentCard, User
 from ..services.student_matching import _student_to_dict
 
 router = APIRouter(tags=["students"])
+
+
+@router.get("/students")
+def list_students(
+    q: str | None = Query(None, description="Tìm theo MSSV, họ tên, email, trường/viện"),
+    limit: int = Query(50, ge=1, le=200, description="Số bản ghi tối đa trả về"),
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    """Danh sách sinh viên đã lưu trong bảng students. Yêu cầu đăng nhập."""
+    query = db.query(Student)
+    keyword = (q or "").strip()
+    if keyword:
+        like = f"%{keyword}%"
+        query = query.filter(
+            or_(
+                Student.student_id.ilike(like),
+                Student.full_name.ilike(like),
+                Student.email.ilike(like),
+                Student.school.ilike(like),
+            )
+        )
+
+    students = (
+        query
+        .order_by(Student.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "id": str(student.id),
+            "student_id": student.student_id,
+            "full_name": student.full_name,
+            "birth_date": student.birth_date,
+            "school": student.school,
+            "email": student.email,
+            "study_status": student.study_status,
+            "avatar_url": f"/images/avatar/student/{student.id}" if student.avatar_data else None,
+            "created_at": student.created_at.isoformat() if student.created_at else None,
+        }
+        for student in students
+    ]
 
 
 @router.get("/students/lookup")

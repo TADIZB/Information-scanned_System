@@ -10,15 +10,12 @@ import Profile from "./pages/Profile";
 type Tab = "qr" | "ocr";
 type View = "home" | "app" | "profile";
 type AuthMode = "login" | "register";
-
-// Tài khoản trường (Microsoft/HUST) mới được dùng chức năng gửi thông báo Teams/Outlook.
-const HUST_EMAIL_DOMAINS = ["@sis.hust.edu.vn", "@hust.edu.vn"];
-const isHustEmail = (email: string | null) =>
-  !!email && HUST_EMAIL_DOMAINS.some((domain) => email.trim().toLowerCase().endsWith(domain));
+type AuthProvider = "local" | "microsoft" | null;
 
 export default function App() {
   const [username, setUsername] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [authProvider, setAuthProvider] = useState<AuthProvider>(null);
   const [checking, setChecking] = useState(true);
   const [view, setView] = useState<View>("home");
   const [tab, setTab] = useState<Tab>("qr");
@@ -32,8 +29,8 @@ export default function App() {
 
   useEffect(() => {
     getMe()
-      .then((data) => { setUsername(displayName(data)); setUserEmail(data.email); })
-      .catch(() => { setUsername(null); setUserEmail(null); })
+      .then((data) => { setUsername(displayName(data)); setUserEmail(data.email); setAuthProvider(data.auth_provider ?? "local"); })
+      .catch(() => { setUsername(null); setUserEmail(null); setAuthProvider(null); })
       .finally(() => setChecking(false));
   }, []);
 
@@ -41,6 +38,7 @@ export default function App() {
     const data = await getMe();
     setUsername(displayName(data));
     setUserEmail(data.email);
+    setAuthProvider(data.auth_provider ?? "local");
     setShowAuth(false);
     setShowMsLogin(false);
     setView("app");
@@ -149,7 +147,7 @@ export default function App() {
             className={`tab${tab === "ocr" ? " active" : ""}`}
             onClick={() => setTab("ocr")}
           >
-            OCR
+            OCR CCCD/CMND
           </button>
         </nav>
 
@@ -185,7 +183,8 @@ export default function App() {
           <Scanner
             scanMode="qr"
             isLoggedIn={!!username}
-            isHustAccount={isHustEmail(userEmail)}
+            isMicrosoftAccount={authProvider === "microsoft"}
+            currentUserEmail={userEmail}
             onScanSuccess={handleScanSuccess}
             onLoginClick={() => { setAuthMode("login"); setShowAuth(true); }}
           />
@@ -194,7 +193,8 @@ export default function App() {
           <Scanner
             scanMode="ocr"
             isLoggedIn={!!username}
-            isHustAccount={isHustEmail(userEmail)}
+            isMicrosoftAccount={authProvider === "microsoft"}
+            currentUserEmail={userEmail}
             onScanSuccess={handleScanSuccess}
             onLoginClick={() => { setAuthMode("login"); setShowAuth(true); }}
           />

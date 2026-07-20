@@ -68,7 +68,7 @@ export default function Homepage({
             <span className="home-hero-accent">nhanh chóng, chính xác</span>
           </h2>
           <p className="home-hero-desc">
-            Tự động phát hiện thẻ qua camera, trích xuất thông tin bằng OCR và QR.
+            Website dành cho Đại học Bách Khoa Hà Nội
           </p>
           <div className="home-hero-cta">
             <button className="primary home-cta-btn" onClick={onQrClick}>
@@ -81,7 +81,7 @@ export default function Homepage({
           <div className="home-hero-stats">
             <div className="home-stat">
               <strong>2</strong>
-              <span>Chế độ quét</span>
+              <span>Phương thức</span>
             </div>
             <div className="home-stat-divider" />
             <div className="home-stat">

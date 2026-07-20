@@ -27,6 +27,9 @@ class WarpResult:
 
 def load_image(data: bytes) -> Image.Image:
     image = Image.open(io.BytesIO(data))
+    # Bước thu nhận ảnh (QR/OCR): sửa hướng theo EXIF trước khi xử lý.
+    # Ảnh chụp từ điện thoại có thể lưu pixel nằm ngang nhưng gắn metadata xoay;
+    # exif_transpose đưa ảnh về đúng hướng nhìn thấy trên thiết bị.
     # Luôn ép về RGB: ảnh 1-bit ('1'), grayscale ('L'), 'P' hay 'RGBA' sẽ khiến
     # pil_to_cv() (cvtColor RGB→BGR) crash vì sai số kênh / dtype bool.
     return ImageOps.exif_transpose(image).convert("RGB")
@@ -34,6 +37,9 @@ def load_image(data: bytes) -> Image.Image:
 
 def resize_image(image: Image.Image, max_dim: int = 2000) -> Image.Image:
     width, height = image.size
+    # Giới hạn cạnh dài nhất theo công thức s = min(1, max_dim / max(W, H)).
+    # Không phóng ảnh nhỏ ở bước này; chỉ thu ảnh quá lớn để giảm thời gian xử lý
+    # nhưng vẫn giữ nguyên tỉ lệ, tránh làm méo thẻ/QR.
     scale = min(1.0, max_dim / max(width, height))
     if scale >= 1.0:
         return image
@@ -42,6 +48,7 @@ def resize_image(image: Image.Image, max_dim: int = 2000) -> Image.Image:
 
 
 def pil_to_cv(image: Image.Image) -> np.ndarray:
+    # PIL dùng RGB, OpenCV dùng BGR. Chuyển kênh màu ngay tại biên vào pipeline.
     return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
 
 
@@ -147,15 +154,22 @@ def find_document_contour(image: np.ndarray) -> np.ndarray | None:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     h, w = image.shape[:2]
+    # Chỉ nhận contour có diện tích hợp lý so với ảnh:
+    # - dưới 2% thường là nhiễu/chi tiết nhỏ;
+    # - trên 97% thường là viền toàn ảnh/nền, không phải giấy tờ cần warp.
     min_area = (h * w) * 0.02
     max_area = (h * w) * 0.97
 
     # Tự động chọn ngưỡng Canny dựa trên median (Otsu's heuristic)
+    # Tlow = max(0, 0.66m), Thigh = min(255, 1.33m), với m là median mức xám.
+    # Median bền hơn average khi ảnh có bóng tối hoặc điểm lóa.
     median = float(np.median(blurred))
     auto_lo = int(max(0, 0.66 * median))
     auto_hi = int(min(255, 1.33 * median))
 
     threshold_sets = [
+        # Ngưỡng tự động trước, sau đó thử thêm các cặp cố định để cứu ảnh mờ,
+        # thiếu sáng hoặc nền quá phức tạp.
         (auto_lo, auto_hi),
         (50, 150),
         (30, 100),
@@ -175,6 +189,8 @@ def find_document_contour(image: np.ndarray) -> np.ndarray | None:
 
         for contour in contours:
             peri = cv2.arcLength(contour, True)
+            # approxPolyDP dùng epsilon = tol * chu vi. Thử nhiều tol để vừa bắt
+            # được cạnh giấy tờ rõ, vừa chịu được ảnh méo/mất một phần biên.
             for tol in (0.01, 0.015, 0.02, 0.025, 0.03, 0.04):
                 approx = cv2.approxPolyDP(contour, tol * peri, True)
                 if len(approx) == 4:
@@ -219,6 +235,8 @@ def find_content_bbox(image: np.ndarray, pad_ratio: float = 0.04) -> tuple[int, 
     # (3) Canny ngưỡng tự động theo median (thích ứng ảnh sáng/tối thay vì cố định 50/150).
     blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
     med = float(np.median(blurred))
+    # Công thức Tlow/Thigh theo median giúp cùng một pipeline dùng được cho ảnh
+    # rất sáng, rất tối hoặc bị lệch sáng mà không phải chỉnh tay ngưỡng Canny.
     lo = int(max(0, 0.66 * med))
     hi = int(min(255, 1.33 * med))
     edges = cv2.Canny(blurred, lo, hi)
@@ -233,6 +251,8 @@ def find_content_bbox(image: np.ndarray, pad_ratio: float = 0.04) -> tuple[int, 
     c = max(contours, key=cv2.contourArea)
     x, y, bw, bh = cv2.boundingRect(c)
     area_ratio = (bw * bh) / float(h * w)
+    # 15%..97% là khoảng tin cậy cho khối giấy tờ chính: nhỏ hơn dễ là nhiễu,
+    # lớn hơn gần như full-frame nên crop không giúp gì và có nguy cơ cắt nhầm.
     if area_ratio < 0.15 or area_ratio > 0.97:
         return None  # quá nhỏ (không tin) hoặc gần full (không cần cắt)
     px, py = int(pad_ratio * w), int(pad_ratio * h)
@@ -262,8 +282,10 @@ def _deskew(image: np.ndarray, max_angle: float = 15.0) -> np.ndarray:
             angles.append(a)
     if not angles:
         return image
+    # Lấy trung vị góc thay vì trung bình để giảm ảnh hưởng của vài đường nhiễu.
     angle = float(np.median(angles))
     if abs(angle) < 0.3:
+        # Góc quá nhỏ thì không xoay: nội suy có thể làm mềm chữ nhiều hơn lợi ích deskew.
         return image
     h, w = image.shape[:2]
     M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
@@ -292,6 +314,8 @@ def warp_perspective(image: np.ndarray) -> WarpResult:
         [[0, 0], [max_width - 1, 0], [max_width - 1, max_height - 1], [0, max_height - 1]],
         dtype="float32",
     )
+    # M biến bốn góc giấy tờ trên ảnh gốc sang hình chữ nhật đích.
+    # warpPerspective lấy mẫu ngược tương đương Iwarp(x',y') = I(M^-1[x',y',1]^T).
     matrix = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(image, matrix, (max_width, max_height))
     warped = _deskew(warped)
@@ -320,8 +344,13 @@ def _qr_candidate_regions(image: np.ndarray) -> List[np.ndarray]:
     def add_rel(x1: float, y1: float, x2: float, y2: float) -> None:
         boxes.append((int(w * x1), int(h * y1), int(w * x2), int(h * y2)))
 
+    # Server fallback QR: không biết mã nằm ở đâu, nên thử nhiều vùng ứng viên.
+    # 1 vùng toàn ảnh + 1 vùng trung tâm 12%..88% để bỏ bớt nền ngoài khung.
     add_rel(0.00, 0.00, 1.00, 1.00)
     add_rel(0.12, 0.12, 0.88, 0.88)
+
+    # Bốn góc 55% và 65% tạo các crop chồng lấn. Hai kích thước khác nhau giúp
+    # bắt được QR nằm sát góc nhưng vẫn giữ đủ nền/quiet zone quanh mã.
     add_rel(0.00, 0.00, 0.55, 0.55)
     add_rel(0.45, 0.00, 1.00, 0.55)
     add_rel(0.00, 0.45, 0.55, 1.00)
@@ -331,6 +360,8 @@ def _qr_candidate_regions(image: np.ndarray) -> List[np.ndarray]:
     add_rel(0.00, 0.35, 0.65, 1.00)
     add_rel(0.35, 0.35, 1.00, 1.00)
 
+    # Lưới 3x3, mỗi ô nới thêm 6% kích thước ảnh để QR nằm đúng ranh giới ô
+    # không bị cắt đôi. Tối đa: 1 + 1 + 4 + 4 + 9 = 19 vùng.
     pad = 0.06
     for gy in range(3):
         for gx in range(3):
@@ -361,8 +392,10 @@ def _resize_qr_region(region: np.ndarray, min_dim: int = 900, max_dim: int = 180
 
     scale = 1.0
     if longest < min_dim:
+        # QR quá nhỏ: phóng lên để module vuông đủ số pixel cho detector.
         scale = min_dim / longest
     elif longest > max_dim:
+        # QR/crop quá lớn: thu xuống để giảm chi phí thử nhiều biến thể.
         scale = max_dim / longest
 
     if abs(scale - 1.0) < 0.01:
@@ -380,11 +413,17 @@ def preprocess_for_qr(image: np.ndarray) -> List[np.ndarray]:
     pyzbar tự xử lý xoay nên chỉ cần tập trung vào tương phản + scale.
     """
     variants: List[np.ndarray] = []
+    # CLAHE mạnh hơn OCR một chút vì QR là cấu trúc đen-trắng, không cần giữ dấu.
+    # clipLimit=3.0 + tile 8x8 làm nổi các ô QR trong ảnh thiếu tương phản.
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    # Hai kernel làm nét đều có tổng hệ số = 1: giữ mức sáng trung bình, tăng cạnh.
     sharp_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     strong_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
 
     for region in _qr_candidate_regions(image):
+        # Với mỗi vùng: thử bản gốc và bản resize về khoảng 900..1800px.
+        # Sau đó sinh 7 biến thể: gốc, CLAHE, Otsu, adaptive, sharpen,
+        # sharpen mạnh, sharpen mạnh + Otsu. Tối đa 19 * 2 * 7 = 266 ảnh.
         for base in (region, _resize_qr_region(region)):
             variants.append(base)
             gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY) if base.ndim == 3 else base.copy()
@@ -392,9 +431,11 @@ def preprocess_for_qr(image: np.ndarray) -> List[np.ndarray]:
             enhanced = clahe.apply(gray)
             variants.append(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
 
+            # Otsu tự chọn ngưỡng toàn cục, hiệu quả khi ánh sáng tương đối đều.
             _, otsu = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
 
+            # Adaptive Gaussian dùng ngưỡng cục bộ 31x31, C=7 để cứu ảnh lệch sáng.
             adaptive = cv2.adaptiveThreshold(
                 enhanced,
                 255,
@@ -435,6 +476,8 @@ def preprocess_variants_for_ocr(image: np.ndarray) -> Tuple[List[Tuple[str, np.n
     scale = 1.0
     target = 1400
     if max(h, w) < target:
+        # Công thức scale = 1400 / cạnh dài nhất. Chỉ phóng ảnh nhỏ; ảnh đã đủ
+        # lớn giữ nguyên để tránh nội suy dư thừa làm mềm nét chữ.
         scale = target / max(h, w)
         gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
@@ -444,6 +487,8 @@ def preprocess_variants_for_ocr(image: np.ndarray) -> Tuple[List[Tuple[str, np.n
 
     # Unsharp mask — làm nét nét chữ + dấu nhỏ, giúp Tesseract bắt dấu tiếng Việt
     blur = cv2.GaussianBlur(enhanced, (0, 0), 3)
+    # Công thức trong thuyết minh: Isharp = 1.6 * ICLAHE - 0.6 * Gσ=3(ICLAHE).
+    # Thành phần blur đại diện nền/tần số thấp; trừ nó làm nổi cạnh chữ.
     sharp = cv2.addWeighted(enhanced, 1.6, blur, -0.6, 0)
 
     variants: List[Tuple[str, np.ndarray]] = [
@@ -459,6 +504,8 @@ def preprocess_variants_for_ocr(image: np.ndarray) -> Tuple[List[Tuple[str, np.n
             cv2.THRESH_BINARY, 31, 12,
         )),
     ]
+    # Hiện tại OCR thật chỉ dùng CLAHE và sharp. Otsu/adaptive giữ lại trong code
+    # như fallback dễ bật lại, nhưng không dùng mặc định vì nhị phân hoá dễ làm mất dấu.
     variants = variants[:2]
     return variants, scale
 
@@ -499,10 +546,15 @@ def _step4_flat_field(gray: np.ndarray) -> np.ndarray:
     """
     # Kernel rất lớn để chỉ giữ low-frequency illumination
     h, w = gray.shape
+    # k = max(31, min(W,H)/8), ép số lẻ bằng | 1 vì GaussianBlur cần kernel lẻ.
+    # Kernel lớn chỉ giữ ánh sáng nền chậm biến thiên, không giữ nét chữ.
     k = max(31, (min(h, w) // 8) | 1)   # odd, ~12.5% chiều ngắn nhất
     bg = cv2.GaussianBlur(gray, (k, k), 0)
     # Tránh chia 0
     bg = np.where(bg < 1, 1, bg)
+    # Iuniform = Normalize(128 * Igray / max(Ibackground, 1)).
+    # Chia cho nền giúp giảm bóng tối/hotspot vì cả chữ và nền cục bộ cùng bị
+    # ảnh hưởng bởi ánh sáng không đều.
     normalized = cv2.divide(gray, bg, scale=128).astype(np.uint8)
     # Stretch contrast nhẹ để chữ rõ
     normalized = cv2.normalize(normalized, None, 0, 255, cv2.NORM_MINMAX)
@@ -522,6 +574,9 @@ def _step5_adaptive_threshold(gray_uniform: np.ndarray) -> np.ndarray:
         blockSize=25,
         C=10,
     )
+    # Với THRESH_BINARY, pixel sáng hơn ngưỡng Gaussian cục bộ trừ C sẽ thành 255,
+    # ngược lại thành 0. blockSize=25 đủ rộng để bắt chữ nhưng không quá rộng như
+    # ngưỡng toàn cục khi ảnh có vùng sáng/tối khác nhau.
     return binary
 
 
@@ -537,6 +592,9 @@ def _step6_morphology(binary: np.ndarray) -> np.ndarray:
     inv = cv2.bitwise_not(binary)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    # Kernel 2x2 là lựa chọn thận trọng: đủ xoá hạt nhiễu/nối nét đứt nhỏ,
+    # nhưng hạn chế phá dấu tiếng Việt. Ảnh này dùng cho minh hoạ pipeline,
+    # không đưa trực tiếp vào Tesseract mặc định.
     # Opening: erosion → dilation (loại noise nhỏ, tách ký tự dính)
     cleaned = cv2.morphologyEx(inv, cv2.MORPH_OPEN, kernel, iterations=1)
     # Closing: dilation → erosion (nối nét đứt, làm mượt)
@@ -607,7 +665,8 @@ def ocr_cccd(roi_image: np.ndarray) -> tuple[str, List[Dict[str, Any]]]:
     Dùng ensemble (nhiều biến thể tiền xử lý nhẹ × nhiều PSM), gộp dòng theo
     confidence cao nhất — robust hơn nhiều so với 1 lần PSM 6.
     """
-    # PSM 6 (uniform block) + PSM 4 (single column) — hợp với layout 2 cột của CCCD
+    # PSM 6 coi ROI là một khối văn bản tương đối đồng nhất, hợp với CCCD đã warp.
+    # Nếu cần thử layout khác, ocr_ensemble hỗ trợ truyền thêm PSM 4.
     blocks = ocr_ensemble(roi_image, psms=(6,))
     # blocks đã được sort theo (y, x) trong _dedupe_lines → text đúng thứ tự trên→dưới
     lines = [line for b in blocks for line in b.get("lines", [])]
@@ -625,6 +684,8 @@ def detect_qr(image: np.ndarray) -> str | None:
     variants = preprocess_for_qr(image)
     try:
         detector = cv2.QRCodeDetector()
+        # Ưu tiên OpenCV vì không cần dependency native zbar; dừng ngay khi có
+        # chuỗi không rỗng để tránh tốn thời gian trên các biến thể còn lại.
         for variant in variants:
             data, _, _ = detector.detectAndDecode(variant)
             data = data.strip() if data else ""
@@ -636,6 +697,8 @@ def detect_qr(image: np.ndarray) -> str | None:
     try:
         from pyzbar.pyzbar import decode
 
+        # pyzbar là decoder dự phòng. Một số ảnh OpenCV không detect được nhưng
+        # zbar vẫn đọc được, nhất là khi QR đã được threshold/làm nét tốt.
         for variant in variants:
             decoded_objects = decode(variant)
             for obj in decoded_objects:
@@ -672,7 +735,8 @@ def _group_words_into_lines(data: Dict[str, List[str]], min_word_conf: float = 3
             lines[line_key] = {
                 "text": text,
                 "bbox": [left, top, left + width, top + height],
-                # weighted conf accumulator: (Σ conf*len, Σ len)
+                # Cline = Σ(Ci * Li) / ΣLi: từ dài ảnh hưởng nhiều hơn từ ngắn,
+                # tránh một token 1 ký tự kéo lệch confidence cả dòng.
                 "_conf_sum": conf * len(text),
                 "_len_sum": len(text),
             }
@@ -731,6 +795,8 @@ def _log_tesseract_runtime(lang: str) -> None:
 
 
 def _bbox_iou(a: List[int], b: List[int]) -> float:
+    # IoU = diện tích giao / diện tích hợp. Dùng để phát hiện hai dòng OCR trùng
+    # vị trí khi cùng một dòng được nhận từ nhiều biến thể ảnh.
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
     inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
@@ -801,6 +867,8 @@ def ocr_ensemble(image: np.ndarray, psms: Tuple[int, ...] = (6, 4)) -> List[Dict
     for variant_name, variant_img in variants:
         for psm in psms:
             try:
+                # Tesseract trả dữ liệu cấp word. --oem 3 để Tesseract tự chọn
+                # engine tốt nhất có sẵn; timeout=12 tránh request bị treo lâu.
                 data = pytesseract.image_to_data(
                     variant_img,
                     lang=lang,
@@ -1278,17 +1346,33 @@ def extract_cccd_info(
     text = fix_ocr_text(raw_text)
 
     cccd_number = None
+    # Chỉ nhận số CCCD khi nó nằm gần nhãn hợp lệ. Điều này cố ý chặt hơn
+    # việc lấy mọi chuỗi 12 số, vì ảnh OCR có thể chứa MSSV/số hồ sơ/số khác.
     cccd_near_label = _text_near_label(
         text,
         r"CCCD|Căn\s+cước(?:\s+công\s+dân)?|Số\s+(?:căn\s+cước|định\s+danh)|"
-        r"Personal\s+identification|Số\s*/\s*No\. ?",
+        r"Personal\s+identification|Số\s*/\s*No\.?|No\.?",
     )
     if cccd_near_label:
         number_match = _CCCD_NUMBER_RE.search(cccd_near_label)
         if number_match:
             cccd_number = number_match.group(1)
 
+    if not cccd_number:
+        # Gemini/Tesseract thường đọc CCCD mới thành dòng "Số / No.: 038..."
+        # hoặc chỉ còn "No.: 038...". Bắt fallback theo từng dòng nhưng vẫn yêu
+        # cầu có nhãn No/Số để không nhầm MSSV hay số khác.
+        for line in text.splitlines():
+            if not re.search(r"(?:Số\s*/\s*)?No\.?|Số\s*/\s*No", line, re.IGNORECASE):
+                continue
+            number_match = _CCCD_NUMBER_RE.search(line)
+            if number_match:
+                cccd_number = number_match.group(1)
+                break
+
     full_name = None
+    # Tên CCCD được lấy sau nhãn "Họ và tên"/"Full name" và giới hạn 2..5 từ.
+    # Giới hạn này giảm khả năng nuốt sang label kế tiếp hoặc địa chỉ.
     raw_name = _line_after_label(text, r"Họ\s+và\s+tên|Họ\s+tên|Full\s*name")
     if raw_name:
         # CCCD tên thường ALL CAPS → chỉ lấy cụm 2..5 từ ALL CAPS đầu
@@ -1302,7 +1386,9 @@ def extract_cccd_info(
                 full_name = m2.group(1)
 
     if not full_name and blocks and image_height:
-        # Fallback: scoring spatial như student card
+        # Fallback theo vị trí OCR: dùng bbox + confidence để chấm điểm ứng viên tên
+        # khi Tesseract tách nhãn/tên không sạch. y_norm chuẩn hoá về [0..1] để
+        # scoring không phụ thuộc ảnh cao bao nhiêu pixel.
         best_score = -1.0
         for blk in blocks:
             for line in blk.get("lines", []):
@@ -1324,6 +1410,8 @@ def extract_cccd_info(
     )
     birth_date = None
     if birth_raw:
+        # Ngày sinh cũng phải nằm gần nhãn và phải là ngày lịch hợp lệ,
+        # không ở tương lai. Không fallback lấy ngày bất kỳ để tránh nhầm ngày hết hạn.
         m = _DATE_RE.search(birth_raw)
         if m:
             birth_date = _valid_birth_date(m.group(1))

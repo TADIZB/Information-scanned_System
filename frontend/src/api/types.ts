@@ -94,6 +94,7 @@ export interface AuthUser {
   email: string | null;
   full_name: string | null;
   birth_date: string | null;
+  auth_provider?: "local" | "microsoft";
 }
 
 export interface RequestOtpResponse {

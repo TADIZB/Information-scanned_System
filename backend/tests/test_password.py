@@ -1,4 +1,4 @@
-"""Test hash/verify password + validate email HUST + common password check."""
+"""Test hash/verify password + common password check."""
 from __future__ import annotations
 
 import sys
@@ -46,13 +46,3 @@ def test_validate_password_strength_common():
 
 def test_validate_password_strength_ok():
     auth_module.validate_password_strength("matkhau-cuc-manh-2026")
-
-
-def test_is_hust_email():
-    assert auth_module.is_hust_email("abc@sis.hust.edu.vn") is True
-    assert auth_module.is_hust_email("abc.def@SIS.HUST.EDU.VN") is True
-    assert auth_module.is_hust_email("abc@hust.edu.vn") is True
-    assert auth_module.is_hust_email("abc@HUST.EDU.VN") is True
-    assert auth_module.is_hust_email("abc@gmail.com") is False
-    assert auth_module.is_hust_email("abc@xsis.hust.edu.vn") is False
-    assert auth_module.is_hust_email("@sis.hust.edu.vn") is False

@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session as DBSession
 
 from ..auth import (
+    AUTH_PROVIDER_COOKIE_NAME,
     get_current_user,
-    is_hust_email,
     login_hust_user,
     login_user,
     logout_user,
@@ -133,11 +133,6 @@ async def login_microsoft(
     không lưu lại. Đăng nhập đúng → tạo/lấy tài khoản theo email rồi set cookie.
     """
     email = payload.email.strip().lower()
-    if not is_hust_email(email):
-        raise HTTPException(
-            status_code=422,
-            detail="Vui lòng dùng email trường",
-        )
     if not payload.password:
         raise HTTPException(status_code=422, detail="Vui lòng nhập mật khẩu.")
 
@@ -167,11 +162,15 @@ def logout(response: Response):
 
 
 @router.get("/me")
-def me(current_user: User = Depends(get_current_user)):
+def me(
+    current_user: User = Depends(get_current_user),
+    auth_provider: str | None = Cookie(default=None, alias=AUTH_PROVIDER_COOKIE_NAME),
+):
     return {
         "id": str(current_user.id),
         "username": current_user.username,
         "email": current_user.email,
         "full_name": current_user.full_name,
         "birth_date": current_user.birth_date,
+        "auth_provider": auth_provider or "local",
     }

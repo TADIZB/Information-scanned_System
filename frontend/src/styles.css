@@ -1718,6 +1718,7 @@ button.active-btn {
   display: flex;
   align-items: center;
   border-radius: 10px;
+  pointer-events: none;
 }
 
 .mssv-input {
@@ -1734,6 +1735,7 @@ button.active-btn {
 /* Input trong suốt để chữ màu phía dưới hiển thị */
 .mssv-input-ghost {
   position: relative;
+  z-index: 1;
   color: transparent;
   caret-color: #12141f;
   font-family: "IBM Plex Mono", monospace;

@@ -142,6 +142,10 @@ def _match_student_by_cccd(
         return None, ""
 
     name_lc = full_name.lower().strip()
+    # So khớp hai phiên bản tên:
+    # - có dấu: chính xác hơn khi OCR giữ được tiếng Việt;
+    # - bỏ dấu: cứu trường hợp Tesseract/Gemini mất dấu nhưng dễ trùng hơn,
+    #   nên các ngưỡng bên dưới được đặt cao hơn.
     name_stripped_lc = _strip_diacritics(full_name).lower().strip()
     target_birth = _normalize_birth_for_compare(birth_date)
 
@@ -158,6 +162,8 @@ def _match_student_by_cccd(
         sc_dia = fuzz.token_set_ratio(name_lc, db_lc)
         sc_strip = fuzz.token_set_ratio(name_stripped_lc, db_stripped_lc)
 
+        # Ngày sinh là tín hiệu xác nhận mạnh. Khi ngày sinh trùng, chấp nhận
+        # tên có dấu >=86%; nếu tên bỏ dấu thì yêu cầu >=90% vì mất dấu dễ trùng.
         birth_match = bool(target_birth and s_birth and target_birth == s_birth)
 
         # Strategy 1: tên có dấu cao + birth khớp
